@@ -136,6 +136,31 @@ class RhythmFormerTrainer(BaseTrainer):
                     vbar.set_postfix(loss=loss.item())
         return np.mean(valid_loss)
 
+    def save_predictions_readable(self, predictions, labels, save_dir):
+        """Save predictions in human-readable format"""
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Summary file
+        with open(os.path.join(save_dir, 'predictions_summary.txt'), 'w') as f:
+            f.write("PREDICTIONS SUMMARY\n")
+            f.write("=" * 80 + "\n\n")
+            
+            for subj_index in sorted(predictions.keys()):
+                f.write(f"\nSubject: {subj_index}\n")
+                f.write("-" * 40 + "\n")
+                
+                for sort_index in sorted(predictions[subj_index].keys()):
+                    pred = predictions[subj_index][sort_index].cpu().numpy()
+                    label = labels[subj_index][sort_index].cpu().numpy()
+                    
+                    f.write(f"  Chunk {sort_index}:\n")
+                    f.write(f"    Prediction shape: {pred.shape}\n")
+                    f.write(f"    Prediction stats: mean={pred.mean():.4f}, std={pred.std():.4f}, "
+                        f"min={pred.min():.4f}, max={pred.max():.4f}\n")
+                    f.write(f"    Label stats: mean={label.mean():.4f}, std={label.std():.4f}, "
+                        f"min={label.min():.4f}, max={label.max():.4f}\n")
+                    f.write(f"    First 10 predictions: {pred.flatten()[:10]}\n")
+                    f.write(f"    First 10 labels: {label.flatten()[:10]}\n\n")
 
     def test(self, data_loader):
         """ Model evaluation on the testing dataset."""
@@ -190,6 +215,7 @@ class RhythmFormerTrainer(BaseTrainer):
                     labels[subj_index][sort_index] = labels_test[ib * chunk_len:(ib + 1) * chunk_len]
             print(' ')
             calculate_metrics(predictions, labels, self.config)
+            self.save_predictions_readable(predictions, labels, os.path.join(self.config.TEST.OUTPUT_SAVE_DIR, 'readable'))
             if self.config.TEST.OUTPUT_SAVE_DIR: # saving test outputs
                 self.save_test_outputs(predictions, labels, self.config)
 
