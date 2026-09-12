@@ -1,0 +1,59 @@
+BASE: ['']
+TOOLBOX_MODE: "only_test"
+TEST:
+  METRICS: ['MAE', 'RMSE', 'MAPE', 'Pearson', 'SNR', 'BA']
+  USE_LAST_EPOCH: False
+  DATA:
+    FS: 30
+    DATASET: UBFC-rPPG
+    DO_PREPROCESS: True
+    DATA_FORMAT: NDCHW
+    DATA_PATH: "./data/UBFC-rPPG/DATASET_2"
+    CACHED_PATH: "./data/PreprocessedData/experienment0/UBFC"
+    FILE_LIST_PATH: "./data/PreprocessedData/experienment0/UBFC"
+    EXP_DATA_NAME: ""
+    BEGIN: 0.0
+    END: 1.0
+    PREPROCESS:
+      DATA_TYPE: ['Standardized']
+      LABEL_TYPE: Standardized
+      DO_CHUNK: True
+      CHUNK_LENGTH: 160
+      CROP_FACE:
+        DO_CROP_FACE: True
+        BACKEND: 'HC'
+        USE_LARGE_FACE_BOX: True
+        LARGE_BOX_COEF: 1.5
+        DETECTION:
+          DO_DYNAMIC_DETECTION: False
+          DYNAMIC_DETECTION_FREQUENCY: 30
+          USE_MEDIAN_FACE_BOX: False
+      RESIZE:
+        H: 128
+        W: 128
+DEVICE: cuda:0
+NUM_OF_GPU_TRAIN: 1
+LOG:
+  PATH: runs/exp3
+MODEL:
+  DROP_RATE: 0.2
+  NAME: RhythmFormer
+INFERENCE:
+  BATCH_SIZE: 4
+  EVALUATION_METHOD: "FFT"
+  EVALUATION_WINDOW:
+    USE_SMALLER_WINDOW: False
+    WINDOW_SIZE: 10
+  MODEL_PATH: "./final_model_release/PURE_RhythmFormer.pth"
+  FEW_SHOT:
+    ENABLE: True
+    SUPPORT_FRAMES: 540 # total number of frames used as a support set for each subject
+    ADAPT_STEPS: 5
+    LR: 1.0e-5
+    WEIGHT_DECAY: 0.0
+    WINDOW_FRAMES: 160 # used as fixed-size for each subjects query windows
+    NOISE: # apply noise to support set
+      ENABLE: False
+      SUBJECT_IDS: ['subject45', 'subject47', 'subject30', 'subject8', 'subject33', 'subject26', 'subject4'] 
+      STD: 0.08
+      SEED: 100
