@@ -113,7 +113,11 @@ def test(config, data_loader_dict):
         model_trainer = trainer.RhythmFormerTrainer.RhythmFormerTrainer(config, data_loader_dict)
     else:
         raise ValueError('Your Model is Not Supported  Yet!')
-    model_trainer.test(data_loader_dict)
+    # RhythmFormer Few-Shot Test-Time Adaption 
+    if config.MODEL.NAME == 'RhythmFormer' and config.INFERENCE.FEW_SHOT.ENABLE:
+        model_trainer.test_few_shot(data_loader_dict)
+    else:
+        model_trainer.test(data_loader_dict)
 
 
 def unsupervised_method_inference(config, data_loader):

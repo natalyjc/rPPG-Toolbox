@@ -21,3 +21,4 @@ test.yaml
 *.out
 data/
 cuda-keyring_1.0-1_all.deb
+.venv
