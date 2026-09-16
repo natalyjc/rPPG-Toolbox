@@ -6,7 +6,7 @@ TEST:
   DATA:
     FS: 30
     DATASET: UBFC-rPPG
-    DO_PREPROCESS: True
+    DO_PREPROCESS: False
     DATA_FORMAT: NDCHW
     DATA_PATH: "./data/UBFC-rPPG/DATASET_2"
     CACHED_PATH: "./data/PreprocessedData/experienment0/UBFC"
@@ -54,6 +54,6 @@ INFERENCE:
     WINDOW_FRAMES: 160 # used as fixed-size for each subjects query windows
     NOISE: # apply noise to support set
       ENABLE: False
-      SUBJECT_IDS: ['subject45', 'subject47', 'subject30', 'subject8', 'subject33', 'subject26', 'subject4'] 
+      SUBJECT_IDS: []
       STD: 0.08
       SEED: 100

@@ -54,6 +54,6 @@ INFERENCE:
     WINDOW_FRAMES: 160 # used as fixed-size for each subjects query windows
     NOISE: # apply noise to support set
       ENABLE: False 
-      SUBJECT_IDS: ['subject8', 'subject26', 'subject15', 'subject13', 'subject48', 'subject45', 'subject20', 'subject30', 'subject47'] 
+      SUBJECT_IDS: [] 
       STD: 0.08
       SEED: 100
