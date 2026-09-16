@@ -1,14 +1,19 @@
-"""Trainer for RhythmFormer."""
+"""Trainer for RhythmFormer Few-Shot Adaption at Inference"""
 import os
+import copy
 import numpy as np
+import pandas as pd
 import torch
 import torch.optim as optim
-import random
 from tqdm import tqdm
+from evaluation.post_process import *
 from evaluation.metrics import calculate_metrics
+from evaluation.few_shot_metrics import calculate_few_shot_metrics, save_few_shot_plots, save_few_shot_reports
 from neural_methods.model.RhythmFormer import RhythmFormer
 from neural_methods.trainer.BaseTrainer import BaseTrainer
 from neural_methods.loss.RythmFormerLossComputer import RhythmFormer_Loss
+from neural_methods.few_shot.utils import collect_subject_sequences, adapt_model_on_support
+from neural_methods.noise.utils import is_noise_target, apply_support_noise
 
 class RhythmFormerTrainer(BaseTrainer):
 
@@ -40,6 +45,7 @@ class RhythmFormerTrainer(BaseTrainer):
         elif config.TOOLBOX_MODE == "only_test":
             self.model = RhythmFormer().to(self.device)
             self.model = torch.nn.DataParallel(self.model, device_ids=list(range(config.NUM_OF_GPU_TRAIN)))
+            self.criterion = RhythmFormer_Loss()
         else:
             raise ValueError("EfficientPhys trainer initialized in incorrect toolbox mode!")
 
@@ -135,32 +141,161 @@ class RhythmFormerTrainer(BaseTrainer):
                     valid_step += 1
                     vbar.set_postfix(loss=loss.item())
         return np.mean(valid_loss)
+    
+    def test_few_shot(self, data_loader):
+        """Few-shot adaptation testing on support/query splits for each subject."""
+        if data_loader["test"] is None:
+            raise ValueError("No data for test")
+        if not os.path.exists(self.config.INFERENCE.MODEL_PATH):
+            raise ValueError("Inference model path error! Please check INFERENCE.MODEL_PATH in your yaml.")
 
-    def save_predictions_readable(self, predictions, labels, save_dir):
-        """Save predictions in human-readable format"""
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # Summary file
-        with open(os.path.join(save_dir, 'predictions_summary.txt'), 'w') as f:
-            f.write("PREDICTIONS SUMMARY\n")
-            f.write("=" * 80 + "\n\n")
-            
-            for subj_index in sorted(predictions.keys()):
-                f.write(f"\nSubject: {subj_index}\n")
-                f.write("-" * 40 + "\n")
+        print('')
+        print("===Few-Shot Testing (RhythmFormer)===" )
+
+        self.model.load_state_dict(torch.load(self.config.INFERENCE.MODEL_PATH, map_location=self.device))
+        self.model = self.model.to(self.config.DEVICE)
+        self.model.eval()
+        print("Loaded baseline pretrained model for few-shot adaptation.")
+        if self.config.INFERENCE.FEW_SHOT.NOISE.ENABLE:
+            print(
+                "Few-shot noise config: "
+                f"subjects={list(self.config.INFERENCE.FEW_SHOT.NOISE.SUBJECT_IDS)}, "
+                f"std={self.config.INFERENCE.FEW_SHOT.NOISE.STD}, "
+                f"seed={self.config.INFERENCE.FEW_SHOT.NOISE.SEED}"
+            )
+
+        diff_flag = self.config.TEST.DATA.PREPROCESS.LABEL_TYPE == "DiffNormalized"
+        support_frames = int(self.config.INFERENCE.FEW_SHOT.SUPPORT_FRAMES)
+        adapt_steps = int(self.config.INFERENCE.FEW_SHOT.ADAPT_STEPS)
+        window_frames = int(self.config.INFERENCE.FEW_SHOT.WINDOW_FRAMES)
+        subject_sequences = collect_subject_sequences(data_loader['test'])
+        subject_ids = sorted(subject_sequences.keys())
+
+        gt_hr_all = []
+        baseline_hr_all = []
+        adapted_hr_all = []
+        baseline_snr_all = []
+        adapted_snr_all = []
+        noisy_subject_ids = []
+        subject_query_window_counts = dict()
+        per_subject_metrics = dict()
+        baseline_predictions = dict()
+        adapted_predictions = dict()
+        all_labels = dict()
+
+        for subj_index in tqdm(subject_ids, ncols=80):
+
+            subject_data = subject_sequences[subj_index]["data"]
+            subject_labels = subject_sequences[subj_index]["labels"]
+            if subject_data.shape[0] <= support_frames:
+                print(f"Warning: Subject {subj_index} has only {subject_data.shape[0]} frames and will be skipped.")
+                continue
+
+            support_data = subject_data[:support_frames]
+            support_labels = subject_labels[:support_frames]
+            query_data = subject_data[support_frames:]
+            query_labels = subject_labels[support_frames:]
+            query_window_count = query_data.shape[0] // window_frames
+            if query_window_count < 1:
+                print(f"Warning: Subject {subj_index} has no full query windows and will be skipped.")
+                continue
+
+            subject_gt_hr = []
+            subject_baseline_hr = []
+            subject_adapted_hr = []
+            subject_baseline_snr = []
+            subject_adapted_snr = []
+            subject_baseline_preds = []
+            subject_adapted_preds = []
+            subject_label_windows = []
+
+            # Few-Shot Baseline Model Query Window Eval
+            for window_idx in range(query_window_count):
+                start = window_idx * window_frames
+                end = start + window_frames
+                query_window_data = query_data[start:end]
+                query_window_label = query_labels[start:end].numpy()
+
+                with torch.no_grad():
+                    input_data = query_window_data.unsqueeze(0).to(self.config.DEVICE)
+                    pred_ppg = self.model(input_data)
+                    pred_ppg = (pred_ppg - torch.mean(pred_ppg, axis=-1).view(-1, 1)) / (torch.std(pred_ppg, axis=-1).view(-1, 1) + 1e-8)
+                    baseline_pred_window = pred_ppg.squeeze(0).detach().cpu().numpy()
+                    gt_hr, baseline_hr, baseline_snr, _ = calculate_metric_per_video(baseline_pred_window, query_window_label, diff_flag=diff_flag, fs=self.config.TEST.DATA.FS, hr_method="FFT")
+
+                gt_hr_all.append(gt_hr)
+                baseline_hr_all.append(baseline_hr)
+                baseline_snr_all.append(baseline_snr)
+                subject_gt_hr.append(gt_hr)
+                subject_baseline_hr.append(baseline_hr)
+                subject_baseline_snr.append(baseline_snr)
+                subject_baseline_preds.append(baseline_pred_window)
+                subject_label_windows.append(query_window_label)
+
+            # Exp_2 & Exp_4: Applying Noise to Worse MAE Improved Subjects
+            should_corrupt_support = is_noise_target(self.config, subj_index)
+            if should_corrupt_support:
+                support_data_for_adaptation = apply_support_noise(self.config, support_data, subj_index)
+                noisy_subject_ids.append(subj_index)
+            else:
+                support_data_for_adaptation = support_data
                 
-                for sort_index in sorted(predictions[subj_index].keys()):
-                    pred = predictions[subj_index][sort_index].cpu().numpy()
-                    label = labels[subj_index][sort_index].cpu().numpy()
-                    
-                    f.write(f"  Chunk {sort_index}:\n")
-                    f.write(f"    Prediction shape: {pred.shape}\n")
-                    f.write(f"    Prediction stats: mean={pred.mean():.4f}, std={pred.std():.4f}, "
-                        f"min={pred.min():.4f}, max={pred.max():.4f}\n")
-                    f.write(f"    Label stats: mean={label.mean():.4f}, std={label.std():.4f}, "
-                        f"min={label.min():.4f}, max={label.max():.4f}\n")
-                    f.write(f"    First 10 predictions: {pred.flatten()[:10]}\n")
-                    f.write(f"    First 10 labels: {label.flatten()[:10]}\n\n")
+            adapted_model = adapt_model_on_support(copy.deepcopy(self.model), support_data_for_adaptation, support_labels, adapt_steps, diff_flag, window_frames, self.config, self.criterion)
+
+            # Few-Shot Adapted Model Query Window Eval
+            for window_idx in range(query_window_count):
+                start = window_idx * window_frames
+                end = start + window_frames
+                query_window_data = query_data[start:end]
+                query_window_label = query_labels[start:end].numpy()
+
+                with torch.no_grad():
+                    input_data = query_window_data.unsqueeze(0).to(self.config.DEVICE)
+                    pred_ppg = adapted_model(input_data)
+                    pred_ppg = (pred_ppg - torch.mean(pred_ppg, axis=-1).view(-1, 1)) / (torch.std(pred_ppg, axis=-1).view(-1, 1) + 1e-8)
+                    adapted_pred_window = pred_ppg.squeeze(0).detach().cpu().numpy()
+                    _, adapted_hr, adapted_snr, _ = calculate_metric_per_video(adapted_pred_window, query_window_label, diff_flag=diff_flag, fs=self.config.TEST.DATA.FS, hr_method="FFT")
+
+                adapted_hr_all.append(adapted_hr)
+                adapted_snr_all.append(adapted_snr)
+                subject_adapted_hr.append(adapted_hr)
+                subject_adapted_snr.append(adapted_snr)
+                subject_adapted_preds.append(adapted_pred_window)
+
+            subject_query_window_counts[subj_index] = int(query_window_count)
+            baseline_predictions[subj_index] = np.concatenate(subject_baseline_preds, axis=0)
+            adapted_predictions[subj_index] = np.concatenate(subject_adapted_preds, axis=0)
+            all_labels[subj_index] = np.concatenate(subject_label_windows, axis=0)
+
+            subject_baseline_metrics, subject_adapted_metrics = calculate_few_shot_metrics(subject_gt_hr, subject_baseline_hr, subject_adapted_hr, subject_baseline_snr, subject_adapted_snr)
+            per_subject_metrics[subj_index] = {
+                "query_window_count": int(query_window_count),
+                "baseline": subject_baseline_metrics,
+                "adapted": subject_adapted_metrics,
+                "noise_targeted": bool(should_corrupt_support),
+            }
+
+        baseline_metrics, adapted_metrics = calculate_few_shot_metrics(gt_hr_all, baseline_hr_all, adapted_hr_all, baseline_snr_all, adapted_snr_all)
+        save_few_shot_plots(gt_hr_all, baseline_hr_all, adapted_hr_all, self.config)
+
+        results = {
+            "support_frames": support_frames,
+            "adapt_steps": adapt_steps,
+            "window_frames": window_frames,
+            "num_subjects": len(subject_query_window_counts),
+            "baseline": baseline_metrics,
+            "adapted": adapted_metrics,
+            "subject_query_window_counts": subject_query_window_counts,
+            "per_subject_metrics": per_subject_metrics,
+            "noisy_subject_ids": noisy_subject_ids,
+            "noise_config": {
+                "enable": bool(self.config.INFERENCE.FEW_SHOT.NOISE.ENABLE),
+                "subject_ids": list(self.config.INFERENCE.FEW_SHOT.NOISE.SUBJECT_IDS),
+                "std": float(self.config.INFERENCE.FEW_SHOT.NOISE.STD),
+                "seed": int(self.config.INFERENCE.FEW_SHOT.NOISE.SEED),
+            },
+        }
+        save_few_shot_reports(results, baseline_predictions, adapted_predictions, all_labels, self.config)
 
     def test(self, data_loader):
         """ Model evaluation on the testing dataset."""
